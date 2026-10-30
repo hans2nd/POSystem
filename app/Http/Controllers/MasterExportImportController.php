@@ -34,17 +34,44 @@ class MasterExportImportController extends Controller
      */
     public function import(Request $request, string $type): JsonResponse
     {
-        $request->validate([
-            'file' => 'required|file|mimes:xlsx,xls,csv,txt|max:10240',
-        ], [
-            'file.required' => 'Pilih file Excel atau CSV yang akan diunggah.',
-            'file.mimes' => 'Format file harus berupa Excel (.xlsx, .xls) atau CSV (.csv).',
-            'file.max' => 'Ukuran file maksimal 10MB.',
-        ]);
+        try {
+            if (!$request->hasFile('file') || !$request->file('file')->isValid()) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Pilih file Excel atau CSV yang valid untuk diunggah.',
+                ], 422);
+            }
 
-        $updateExisting = $request->boolean('update_existing', true);
-        $result = $this->service->importData($type, $request->file('file'), $updateExisting);
+            $file = $request->file('file');
+            $ext = strtolower($file->getClientOriginalExtension());
 
-        return response()->json($result, $result['success'] ? 200 : 422);
+            if (!in_array($ext, ['xlsx', 'xls', 'csv', 'txt'], true)) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Format file harus berupa Excel (.xlsx, .xls) atau CSV (.csv).',
+                ], 422);
+            }
+
+            if ($file->getSize() > 10 * 1024 * 1024) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Ukuran file maksimal 10MB.',
+                ], 422);
+            }
+
+            $updateExisting = $request->boolean('update_existing', true);
+            $result = $this->service->importData($type, $file, $updateExisting);
+
+            return response()->json($result, $result['success'] ? 200 : 422);
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::error("Master Import Error [{$type}]: " . $e->getMessage(), [
+                'exception' => $e,
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Terjadi kesalahan saat memproses file: ' . $e->getMessage(),
+            ], 422);
+        }
     }
 }

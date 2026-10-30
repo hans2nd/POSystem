@@ -226,6 +226,9 @@ class GoodsReceiptController extends Controller
         $filename = 'daftar_barang_masuk_' . now()->format('Ymd_His') . '.csv';
 
         return response()->streamDownload(function () use ($items) {
+            while (ob_get_level() > 0) {
+                @ob_end_clean();
+            }
             $handle = fopen('php://output', 'w');
             // UTF-8 BOM
             fprintf($handle, chr(0xEF).chr(0xBB).chr(0xBF));
@@ -235,24 +238,24 @@ class GoodsReceiptController extends Controller
             foreach ($items as $item) {
                 $receiveDate = $item->received_at 
                     ? $item->received_at->format('d/m/Y H:i') 
-                    : ($item->purchaseOrder->received_at ? $item->purchaseOrder->received_at->format('d/m/Y H:i') : '-');
+                    : ($item->purchaseOrder?->received_at ? $item->purchaseOrder->received_at->format('d/m/Y H:i') : '-');
 
                 $status = ($item->received_quantity >= $item->quantity) ? 'Lengkap' : 'Sebagian';
 
                 fputcsv($handle, [
                     $receiveDate,
-                    $item->product->sku ?? '-',
-                    $item->product->name ?? '-',
-                    $item->product->category->name ?? '-',
-                    $item->product->category->asset ?? '-',
+                    $item->product?->sku ?? '-',
+                    $item->product?->name ?? '-',
+                    $item->product?->category?->name ?? '-',
+                    $item->product?->category?->asset ?? '-',
                     $item->received_quantity,
                     $item->quantity,
-                    $item->product->unit ?? 'Pcs',
+                    $item->product?->unit ?? 'Pcs',
                     $status,
-                    $item->purchaseOrder->po_number ?? '-',
-                    $item->purchaseOrder->purchaseRequest->pr_number ?? '-',
-                    $item->purchaseOrder->vendor->name ?? '-',
-                    $item->purchaseOrder->branch->name ?? '-',
+                    $item->purchaseOrder?->po_number ?? '-',
+                    $item->purchaseOrder?->purchaseRequest?->pr_number ?? '-',
+                    $item->purchaseOrder?->vendor?->name ?? '-',
+                    $item->purchaseOrder?->branch?->name ?? '-',
                 ]);
             }
 

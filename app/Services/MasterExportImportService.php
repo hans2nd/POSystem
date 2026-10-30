@@ -149,62 +149,12 @@ class MasterExportImportService
             abort(404, 'Master type tidak ditemukan');
         }
 
-        $spreadsheet = new Spreadsheet();
-        $sheet = $spreadsheet->getActiveSheet();
-        $sheet->setTitle(substr($config['title'], 0, 31));
-
-        // Header
-        $headers = $config['headers'];
-        $colCount = count($headers);
-
-        for ($i = 0; $i < $colCount; $i++) {
-            $colLetter = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::stringFromColumnIndex($i + 1);
-            $sheet->setCellValue("{$colLetter}1", $headers[$i]);
-        }
-
-        // Style header row
-        $lastCol = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::stringFromColumnIndex($colCount);
-        $headerRange = "A1:{$lastCol}1";
-        $sheet->getStyle($headerRange)->applyFromArray([
-            'font' => ['bold' => true, 'color' => ['rgb' => 'FFFFFF']],
-            'fill' => [
-                'fillType' => Fill::FILL_SOLID,
-                'startColor' => ['rgb' => '1E293B'], // Dark corporate slate
-            ],
-            'alignment' => [
-                'horizontal' => Alignment::HORIZONTAL_CENTER,
-                'vertical' => Alignment::VERTICAL_CENTER,
-            ],
-        ]);
-        $sheet->getRowDimension(1)->setRowHeight(28);
-
-        // Add sample rows
-        if (!empty($config['sample'])) {
-            $rowIndex = 2;
-            foreach ($config['sample'] as $row) {
-                for ($j = 0; $j < count($row); $j++) {
-                    $colLetter = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::stringFromColumnIndex($j + 1);
-                    $sheet->setCellValue("{$colLetter}{$rowIndex}", $row[$j]);
-                }
-                $rowIndex++;
-            }
-        }
-
-        // Auto width
-        for ($i = 1; $i <= $colCount; $i++) {
-            $colLetter = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::stringFromColumnIndex($i);
-            $sheet->getColumnDimension($colLetter)->setAutoSize(true);
-        }
-
-        $filename = $config['template_filename'];
-
-        return response()->streamDownload(function () use ($spreadsheet) {
-            $writer = new Xlsx($spreadsheet);
-            $writer->save('php://output');
-        }, $filename, [
-            'Content-Type' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            'Cache-Control' => 'max-age=0',
-        ]);
+        return $this->streamExcelDownload(
+            $config['template_filename'],
+            substr($config['title'], 0, 31),
+            $config['headers'],
+            $config['sample'] ?? []
+        );
     }
 
     /**
@@ -217,59 +167,101 @@ class MasterExportImportService
             abort(404, 'Master type tidak ditemukan');
         }
 
-        $spreadsheet = new Spreadsheet();
-        $sheet = $spreadsheet->getActiveSheet();
-        $sheet->setTitle(substr($config['title'], 0, 31));
-
-        $headers = $config['headers'];
-        $colCount = count($headers);
-
-        for ($i = 0; $i < $colCount; $i++) {
-            $colLetter = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::stringFromColumnIndex($i + 1);
-            $sheet->setCellValue("{$colLetter}1", $headers[$i]);
-        }
-
-        $lastCol = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::stringFromColumnIndex($colCount);
-        $headerRange = "A1:{$lastCol}1";
-        $sheet->getStyle($headerRange)->applyFromArray([
-            'font' => ['bold' => true, 'color' => ['rgb' => 'FFFFFF']],
-            'fill' => [
-                'fillType' => Fill::FILL_SOLID,
-                'startColor' => ['rgb' => '1E293B'],
-            ],
-            'alignment' => [
-                'horizontal' => Alignment::HORIZONTAL_CENTER,
-                'vertical' => Alignment::VERTICAL_CENTER,
-            ],
-        ]);
-        $sheet->getRowDimension(1)->setRowHeight(28);
-
-        // Populate records
         $dataRows = $this->fetchDataRows($type);
-        $rowIndex = 2;
 
-        foreach ($dataRows as $row) {
-            for ($j = 0; $j < count($row); $j++) {
-                $colLetter = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::stringFromColumnIndex($j + 1);
-                $sheet->setCellValue("{$colLetter}{$rowIndex}", $row[$j]);
+        return $this->streamExcelDownload(
+            $config['filename'],
+            substr($config['title'], 0, 31),
+            $config['headers'],
+            $dataRows
+        );
+    }
+
+    /**
+     * Generate Excel binary (via PhpSpreadsheet if available, or pure-PHP native XLSX fallback)
+     * and stream it safely to the browser without failing on missing ext-zip or restricted /tmp.
+     */
+    protected function streamExcelDownload(string $filename, string $sheetTitle, array $headers, array $dataRows): StreamedResponse
+    {
+        $xlsxBinary = null;
+
+        if (class_exists(Spreadsheet::class) && class_exists(Xlsx::class) && class_exists(\ZipArchive::class)) {
+            try {
+                $spreadsheet = new Spreadsheet();
+                $sheet = $spreadsheet->getActiveSheet();
+                $sheet->setTitle($sheetTitle ?: 'Sheet1');
+
+                $colCount = count($headers);
+                for ($i = 0; $i < $colCount; $i++) {
+                    $colLetter = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::stringFromColumnIndex($i + 1);
+                    $sheet->setCellValue("{$colLetter}1", $headers[$i]);
+                }
+
+                $lastCol = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::stringFromColumnIndex($colCount);
+                $headerRange = "A1:{$lastCol}1";
+                $sheet->getStyle($headerRange)->applyFromArray([
+                    'font' => ['bold' => true, 'color' => ['rgb' => 'FFFFFF']],
+                    'fill' => [
+                        'fillType' => Fill::FILL_SOLID,
+                        'startColor' => ['rgb' => '1E293B'],
+                    ],
+                    'alignment' => [
+                        'horizontal' => Alignment::HORIZONTAL_CENTER,
+                        'vertical' => Alignment::VERTICAL_CENTER,
+                    ],
+                ]);
+                $sheet->getRowDimension(1)->setRowHeight(28);
+
+                $rowIndex = 2;
+                foreach ($dataRows as $row) {
+                    $rowValues = array_values((array) $row);
+                    for ($j = 0; $j < count($rowValues); $j++) {
+                        $colLetter = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::stringFromColumnIndex($j + 1);
+                        $sheet->setCellValue("{$colLetter}{$rowIndex}", $rowValues[$j]);
+                    }
+                    $rowIndex++;
+                }
+
+                for ($i = 1; $i <= $colCount; $i++) {
+                    $colLetter = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::stringFromColumnIndex($i);
+                    $sheet->getColumnDimension($colLetter)->setAutoSize(true);
+                }
+
+                $tempDir = storage_path('app/temp');
+                if (!is_dir($tempDir)) {
+                    @mkdir($tempDir, 0775, true);
+                }
+                if (!is_dir($tempDir) || !is_writable($tempDir)) {
+                    $tempDir = sys_get_temp_dir();
+                }
+
+                $tempFile = rtrim($tempDir, '/\\') . DIRECTORY_SEPARATOR . 'xlsx_' . uniqid('', true) . '.xlsx';
+                $writer = new Xlsx($spreadsheet);
+                $writer->save($tempFile);
+
+                if (is_file($tempFile) && filesize($tempFile) > 0) {
+                    $xlsxBinary = file_get_contents($tempFile);
+                }
+                @unlink($tempFile);
+            } catch (\Throwable $e) {
+                \Illuminate\Support\Facades\Log::warning('PhpSpreadsheet export fallback triggered: ' . $e->getMessage());
+                $xlsxBinary = null;
             }
-            $rowIndex++;
         }
 
-        // Auto width
-        for ($i = 1; $i <= $colCount; $i++) {
-            $colLetter = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::stringFromColumnIndex($i);
-            $sheet->getColumnDimension($colLetter)->setAutoSize(true);
+        if (!$xlsxBinary) {
+            $xlsxBinary = $this->buildNativeXlsxBinary($sheetTitle ?: 'Sheet1', $headers, $dataRows);
         }
 
-        $filename = $config['filename'];
-
-        return response()->streamDownload(function () use ($spreadsheet) {
-            $writer = new Xlsx($spreadsheet);
-            $writer->save('php://output');
+        return response()->streamDownload(function () use ($xlsxBinary) {
+            while (ob_get_level() > 0) {
+                @ob_end_clean();
+            }
+            echo $xlsxBinary;
         }, $filename, [
             'Content-Type' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            'Cache-Control' => 'max-age=0',
+            'Cache-Control' => 'max-age=0, no-cache, no-store, must-revalidate',
+            'Pragma' => 'public',
         ]);
     }
 
@@ -385,14 +377,12 @@ class MasterExportImportService
         }
 
         try {
-            $spreadsheet = IOFactory::load($file->getRealPath());
-            $sheet = $spreadsheet->getActiveSheet();
-            $rows = $sheet->toArray(null, true, true, false);
+            $rows = $this->extractRowsFromUploadedFile($file);
 
             if (count($rows) < 2) {
                 return [
                     'success' => false,
-                    'message' => 'File Excel kosong atau tidak memiliki data baris untuk diimpor.',
+                    'message' => 'File Excel/CSV kosong atau tidak memiliki data baris untuk diimpor.',
                 ];
             }
 
@@ -407,13 +397,17 @@ class MasterExportImportService
             foreach ($rows as $index => $row) {
                 $line = $index + 2; // Excel row numbering
 
+                if (!is_array($row)) {
+                    continue;
+                }
+
                 // Skip completely empty rows
-                if (empty(array_filter($row, fn($val) => !is_null($val) && trim($val) !== ''))) {
+                if (empty(array_filter($row, fn($val) => !is_null($val) && trim((string) $val) !== ''))) {
                     continue;
                 }
 
                 try {
-                    $res = $this->processRowImport($type, $row, $updateExisting);
+                    $res = $this->processRowImport($type, array_values($row), $updateExisting);
                     if ($res === 'added') {
                         $added++;
                     } elseif ($res === 'updated') {
@@ -421,7 +415,7 @@ class MasterExportImportService
                     } else {
                         $failed++;
                     }
-                } catch (\Exception $e) {
+                } catch (\Throwable $e) {
                     $failed++;
                     $errors[] = "Baris {$line}: " . $e->getMessage();
                 }
@@ -435,15 +429,515 @@ class MasterExportImportService
                 'added' => $added,
                 'updated' => $updated,
                 'failed' => $failed,
-                'errors' => array_slice($errors, 0, 10), // Return max 10 error lines for readability
+                'errors' => array_slice($errors, 0, 10),
             ];
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::error("Master Import Parse Error [{$type}]: " . $e->getMessage(), [
+                'exception' => $e,
+            ]);
 
-        } catch (\Exception $e) {
             return [
                 'success' => false,
                 'message' => 'Gagal membaca file: ' . $e->getMessage(),
             ];
         }
+    }
+
+    /**
+     * Extract 2D array of rows from an uploaded .xlsx, .xls, or .csv file.
+     * Supports PhpSpreadsheet when available and falls back to pure-PHP native XLSX/CSV/HTML parsers
+     * when ext-zip or PhpSpreadsheet is unavailable in production.
+     */
+    protected function extractRowsFromUploadedFile(UploadedFile $file): array
+    {
+        $ext = strtolower($file->getClientOriginalExtension());
+        $filePath = $file->getRealPath() ?: $file->getPathname();
+        $rawContent = null;
+
+        if ($filePath && is_readable($filePath)) {
+            $rawContent = @file_get_contents($filePath);
+        }
+        if ($rawContent === false || $rawContent === null) {
+            $rawContent = $file->get();
+        }
+
+        // 1. If CSV or TXT, parse directly with delimiter auto-detection
+        if (in_array($ext, ['csv', 'txt'], true)) {
+            return $this->parseCsvContentRows((string) $rawContent);
+        }
+
+        // 2. Try PhpSpreadsheet if available (and ZipArchive is loaded for .xlsx)
+        $isZip = strncmp((string) $rawContent, "PK\x03\x04", 4) === 0;
+        if (
+            $filePath &&
+            is_readable($filePath) &&
+            class_exists(IOFactory::class) &&
+            (!$isZip || class_exists(\ZipArchive::class))
+        ) {
+            try {
+                $spreadsheet = IOFactory::load($filePath);
+                $sheet = $spreadsheet->getActiveSheet();
+                $rows = $sheet->toArray(null, true, true, false);
+                if (!empty($rows)) {
+                    return $rows;
+                }
+            } catch (\Throwable $e) {
+                \Illuminate\Support\Facades\Log::warning('PhpSpreadsheet import fallback triggered: ' . $e->getMessage());
+            }
+        }
+
+        // 3. Pure-PHP native .xlsx (ZIP + OpenXML) parser fallback
+        if ($isZip) {
+            $rows = $this->parseXlsxBinaryRows((string) $rawContent);
+            if (!empty($rows)) {
+                return $rows;
+            }
+        }
+
+        // 4. HTML/XML Table (.xls) fallback
+        if (stripos((string) $rawContent, '<table') !== false || stripos((string) $rawContent, '<Row') !== false) {
+            $rows = $this->parseXmlOrHtmlTableRows((string) $rawContent);
+            if (!empty($rows)) {
+                return $rows;
+            }
+        }
+
+        // 5. Fallback to CSV parser
+        return $this->parseCsvContentRows((string) $rawContent);
+    }
+
+    /**
+     * Parse CSV / TSV content with UTF-8 BOM removal and automatic delimiter detection (, vs ; vs \t)
+     */
+    protected function parseCsvContentRows(string $content): array
+    {
+        // Strip UTF-8 BOM if present
+        if (strncmp($content, "\xEF\xBB\xBF", 3) === 0) {
+            $content = substr($content, 3);
+        }
+
+        $content = str_replace(["\r\n", "\r"], "\n", trim($content));
+        if ($content === '') {
+            return [];
+        }
+
+        $firstLine = strtok($content, "\n");
+        $delimiters = [',' => substr_count($firstLine, ','), ';' => substr_count($firstLine, ';'), "\t" => substr_count($firstLine, "\t")];
+        arsort($delimiters);
+        $delimiter = array_key_first($delimiters) ?: ',';
+
+        $rows = [];
+        $stream = fopen('php://temp', 'r+');
+        fwrite($stream, $content);
+        rewind($stream);
+
+        while (($data = fgetcsv($stream, 0, $delimiter)) !== false) {
+            if ($data === [null]) {
+                continue;
+            }
+            $rows[] = array_map(fn($v) => is_string($v) ? trim($v) : $v, $data);
+        }
+        fclose($stream);
+
+        return $rows;
+    }
+
+    /**
+     * Parse HTML or SpreadsheetML (.xls) table rows
+     */
+    protected function parseXmlOrHtmlTableRows(string $content): array
+    {
+        $rows = [];
+        if (preg_match_all('/<tr[^>]*>(.*?)<\/tr>/is', $content, $trMatches)) {
+            foreach ($trMatches[1] as $trHtml) {
+                if (preg_match_all('/<t[dh][^>]*>(.*?)<\/t[dh]>/is', $trHtml, $tdMatches)) {
+                    $row = [];
+                    foreach ($tdMatches[1] as $cellHtml) {
+                        $row[] = trim(html_entity_decode(strip_tags($cellHtml), ENT_QUOTES | ENT_XML1, 'UTF-8'));
+                    }
+                    $rows[] = $row;
+                }
+            }
+        } elseif (preg_match_all('/<Row[^>]*>(.*?)<\/Row>/is', $content, $rowMatches)) {
+            foreach ($rowMatches[1] as $rowXml) {
+                if (preg_match_all('/<Cell[^>]*>(.*?)<\/Cell>/is', $rowXml, $cellMatches)) {
+                    $row = [];
+                    foreach ($cellMatches[1] as $cellXml) {
+                        $row[] = trim(html_entity_decode(strip_tags($cellXml), ENT_QUOTES | ENT_XML1, 'UTF-8'));
+                    }
+                    $rows[] = $row;
+                }
+            }
+        }
+        return $rows;
+    }
+
+    /**
+     * Pure-PHP .xlsx (ZIP + OpenXML) reader that works even without ext-zip (ZipArchive)
+     */
+    protected function parseXlsxBinaryRows(string $binary): array
+    {
+        $entries = $this->extractZipEntriesPurePhp($binary);
+        if (empty($entries)) {
+            return [];
+        }
+
+        // Parse sharedStrings.xml if present
+        $sharedStrings = [];
+        if (isset($entries['xl/sharedStrings.xml'])) {
+            $ssXml = @simplexml_load_string($entries['xl/sharedStrings.xml']);
+            if ($ssXml !== false) {
+                foreach ($ssXml->si as $si) {
+                    if (isset($si->t)) {
+                        $sharedStrings[] = (string) $si->t;
+                    } elseif (isset($si->r)) {
+                        $text = '';
+                        foreach ($si->r as $run) {
+                            $text .= (string) ($run->t ?? '');
+                        }
+                        $sharedStrings[] = $text;
+                    } else {
+                        $sharedStrings[] = '';
+                    }
+                }
+            }
+        }
+
+        // Locate worksheet XML
+        $sheetXmlStr = $entries['xl/worksheets/sheet1.xml'] ?? null;
+        if (!$sheetXmlStr) {
+            foreach ($entries as $name => $content) {
+                if (str_starts_with($name, 'xl/worksheets/sheet') && str_ends_with($name, '.xml')) {
+                    $sheetXmlStr = $content;
+                    break;
+                }
+            }
+        }
+        if (!$sheetXmlStr) {
+            return [];
+        }
+
+        $sheetXml = @simplexml_load_string($sheetXmlStr);
+        if ($sheetXml === false || !isset($sheetXml->sheetData->row)) {
+            return [];
+        }
+
+        $rows = [];
+        $maxColIndex = 0;
+
+        foreach ($sheetXml->sheetData->row as $rowElem) {
+            $rowCells = [];
+            $nextColIdx = 0;
+
+            foreach ($rowElem->c as $cell) {
+                $ref = (string) ($cell['r'] ?? '');
+                $colIdx = $ref !== '' ? $this->columnRefToIndex($ref) : $nextColIdx;
+                $nextColIdx = $colIdx + 1;
+                if ($colIdx > $maxColIndex) {
+                    $maxColIndex = $colIdx;
+                }
+
+                $type = (string) ($cell['t'] ?? '');
+                $val = '';
+
+                if ($type === 's') {
+                    $ssIdx = (int) ($cell->v ?? 0);
+                    $val = $sharedStrings[$ssIdx] ?? '';
+                } elseif ($type === 'inlineStr') {
+                    if (isset($cell->is->t)) {
+                        $val = (string) $cell->is->t;
+                    } elseif (isset($cell->is->r)) {
+                        foreach ($cell->is->r as $run) {
+                            $val .= (string) ($run->t ?? '');
+                        }
+                    }
+                } elseif (isset($cell->v)) {
+                    $val = (string) $cell->v;
+                }
+
+                $rowCells[$colIdx] = $val;
+            }
+
+            $rows[] = $rowCells;
+        }
+
+        // Normalize sparse rows into 0..$maxColIndex arrays
+        $normalized = [];
+        foreach ($rows as $rowCells) {
+            $fullRow = [];
+            for ($c = 0; $c <= $maxColIndex; $c++) {
+                $fullRow[$c] = $rowCells[$c] ?? '';
+            }
+            $normalized[] = $fullRow;
+        }
+
+        return $normalized;
+    }
+
+    /**
+     * Convert Excel cell reference (e.g. "A1", "BC12") to 0-based column index
+     */
+    protected function columnRefToIndex(string $cellRef): int
+    {
+        $letters = preg_replace('/[^A-Z]/', '', strtoupper($cellRef));
+        if ($letters === '') {
+            return 0;
+        }
+        $index = 0;
+        $len = strlen($letters);
+        for ($i = 0; $i < $len; $i++) {
+            $index = $index * 26 + (ord($letters[$i]) - 64);
+        }
+        return max(0, $index - 1);
+    }
+
+    /**
+     * Convert 1-based column number (1 = A, 2 = B, ...) to Excel column letters
+     */
+    protected function columnIndexToLetter(int $colNumber): string
+    {
+        $letter = '';
+        while ($colNumber > 0) {
+            $mod = ($colNumber - 1) % 26;
+            $letter = chr(65 + $mod) . $letter;
+            $colNumber = (int) (($colNumber - $mod) / 26);
+        }
+        return $letter ?: 'A';
+    }
+
+    /**
+     * Extract files from a ZIP binary in pure PHP (using Central Directory for reliability with data descriptors)
+     */
+    protected function extractZipEntriesPurePhp(string $binary): array
+    {
+        $entries = [];
+
+        // Find End of Central Directory Record (PK\x05\x06) from the end of the file
+        $eocdPos = strrpos($binary, "PK\x05\x06");
+        if ($eocdPos !== false && strlen($binary) >= $eocdPos + 22) {
+            $eocd = unpack('vdisk/vstartDisk/ventriesOnDisk/vtotalEntries/VcdSize/VcdOffset', substr($binary, $eocdPos + 4, 16));
+            $cdPos = $eocd['cdOffset'];
+            $total = $eocd['totalEntries'];
+
+            for ($i = 0; $i < $total; $i++) {
+                if (substr($binary, $cdPos, 4) !== "PK\x01\x02") {
+                    break;
+                }
+                $cd = unpack(
+                    'vverMade/vverNeeded/vflags/vmethod/vmodTime/vmodDate/Vcrc/VcompSize/VuncompSize/vnameLen/vextraLen/vcommentLen/vdiskStart/vintAttr/VextAttr/VlocalOffset',
+                    substr($binary, $cdPos + 4, 42)
+                );
+                $name = substr($binary, $cdPos + 46, $cd['nameLen']);
+                $cdPos += 46 + $cd['nameLen'] + $cd['extraLen'] + $cd['commentLen'];
+
+                $localPos = $cd['localOffset'];
+                if (substr($binary, $localPos, 4) !== "PK\x03\x04") {
+                    continue;
+                }
+                $local = unpack('vver/vflags/vmethod/vmodTime/vmodDate/Vcrc/VcompSize/VuncompSize/vnameLen/vextraLen', substr($binary, $localPos + 4, 26));
+                $dataStart = $localPos + 30 + $local['nameLen'] + $local['extraLen'];
+                $compData = substr($binary, $dataStart, $cd['compSize']);
+
+                if ($cd['method'] === 0) {
+                    $entries[$name] = $compData;
+                } elseif ($cd['method'] === 8 && function_exists('gzinflate')) {
+                    $inflated = @gzinflate($compData);
+                    if ($inflated !== false) {
+                        $entries[$name] = $inflated;
+                    }
+                }
+            }
+
+            if (!empty($entries)) {
+                return $entries;
+            }
+        }
+
+        // Fallback sequential Local File Header scan if EOCD wasn't matched
+        $offset = 0;
+        $len = strlen($binary);
+        while ($offset + 30 <= $len && substr($binary, $offset, 4) === "PK\x03\x04") {
+            $local = unpack('vver/vflags/vmethod/vmodTime/vmodDate/Vcrc/VcompSize/VuncompSize/vnameLen/vextraLen', substr($binary, $offset + 4, 26));
+            $name = substr($binary, $offset + 30, $local['nameLen']);
+            $dataStart = $offset + 30 + $local['nameLen'] + $local['extraLen'];
+            $compData = substr($binary, $dataStart, $local['compSize']);
+
+            if ($local['method'] === 0) {
+                $entries[$name] = $compData;
+            } elseif ($local['method'] === 8 && function_exists('gzinflate')) {
+                $inflated = @gzinflate($compData);
+                if ($inflated !== false) {
+                    $entries[$name] = $inflated;
+                }
+            }
+
+            $offset = $dataStart + $local['compSize'];
+        }
+
+        return $entries;
+    }
+
+    /**
+     * Build a genuine, styled .xlsx binary in pure PHP without requiring ZipArchive or PhpSpreadsheet
+     */
+    protected function buildNativeXlsxBinary(string $sheetTitle, array $headers, array $dataRows): string
+    {
+        $safeSheetTitle = htmlspecialchars(substr($sheetTitle ?: 'Sheet1', 0, 31), ENT_XML1 | ENT_QUOTES, 'UTF-8');
+        $allRows = array_merge([$headers], $dataRows);
+        $colCount = max(1, count($headers));
+
+        // Calculate auto column widths
+        $colWidths = array_fill(0, $colCount, 14);
+        foreach ($allRows as $row) {
+            $vals = array_values((array) $row);
+            foreach ($vals as $cIdx => $val) {
+                if ($cIdx >= $colCount) {
+                    continue;
+                }
+                $len = mb_strlen((string) $val, 'UTF-8') + 4;
+                if ($len > $colWidths[$cIdx]) {
+                    $colWidths[$cIdx] = min(50, $len);
+                }
+            }
+        }
+
+        $colsXml = '<cols>';
+        for ($i = 0; $i < $colCount; $i++) {
+            $colNum = $i + 1;
+            $w = $colWidths[$i];
+            $colsXml .= "<col min=\"{$colNum}\" max=\"{$colNum}\" width=\"{$w}\" customWidth=\"1\"/>";
+        }
+        $colsXml .= '</cols>';
+
+        $sheetDataXml = '<sheetData>';
+        foreach ($allRows as $rIdx => $row) {
+            $rowNum = $rIdx + 1;
+            $isHeader = ($rowNum === 1);
+            $htAttr = $isHeader ? ' ht="26" customHeight="1"' : '';
+            $sheetDataXml .= "<row r=\"{$rowNum}\"{$htAttr}>";
+
+            $vals = array_values((array) $row);
+            for ($cIdx = 0; $cIdx < count($vals); $cIdx++) {
+                $colLetter = $this->columnIndexToLetter($cIdx + 1);
+                $cellRef = "{$colLetter}{$rowNum}";
+                $val = $vals[$cIdx];
+                $styleAttr = $isHeader ? ' s="1"' : ' s="0"';
+
+                if (!$isHeader && (is_int($val) || is_float($val))) {
+                    $sheetDataXml .= "<c r=\"{$cellRef}\"{$styleAttr}><v>{$val}</v></c>";
+                } else {
+                    $escaped = htmlspecialchars((string) ($val ?? ''), ENT_XML1 | ENT_QUOTES, 'UTF-8');
+                    // Strip invalid XML control chars
+                    $escaped = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F]/', '', $escaped);
+                    $sheetDataXml .= "<c r=\"{$cellRef}\" t=\"inlineStr\"{$styleAttr}><is><t xml:space=\"preserve\">{$escaped}</t></is></c>";
+                }
+            }
+
+            $sheetDataXml .= '</row>';
+        }
+        $sheetDataXml .= '</sheetData>';
+
+        $files = [
+            '[Content_Types].xml' => '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                . '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+                . '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+                . '<Default Extension="xml" ContentType="application/xml"/>'
+                . '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+                . '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+                . '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
+                . '</Types>',
+
+            '_rels/.rels' => '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                . '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                . '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
+                . '</Relationships>',
+
+            'xl/workbook.xml' => '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                . '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+                . '<sheets><sheet name="' . $safeSheetTitle . '" sheetId="1" r:id="rId1"/></sheets>'
+                . '</workbook>',
+
+            'xl/_rels/workbook.xml.rels' => '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                . '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                . '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
+                . '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
+                . '</Relationships>',
+
+            'xl/styles.xml' => '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                . '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+                . '<fonts count="2">'
+                . '<font><sz val="11"/><color rgb="FF1E293B"/><name val="Calibri"/></font>'
+                . '<font><b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="Calibri"/></font>'
+                . '</fonts>'
+                . '<fills count="3">'
+                . '<fill><patternFill patternType="none"/></fill>'
+                . '<fill><patternFill patternType="gray125"/></fill>'
+                . '<fill><patternFill patternType="solid"><fgColor rgb="FF1E293B"/><bgColor indexed="64"/></patternFill></fill>'
+                . '</fills>'
+                . '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>'
+                . '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
+                . '<cellXfs count="2">'
+                . '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
+                . '<xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1" applyAlignment="1">'
+                . '<alignment horizontal="center" vertical="center"/>'
+                . '</xf>'
+                . '</cellXfs>'
+                . '</styleSheet>',
+
+            'xl/worksheets/sheet1.xml' => '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                . '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+                . $colsXml
+                . $sheetDataXml
+                . '</worksheet>',
+        ];
+
+        return $this->packZipArchivePurePhp($files);
+    }
+
+    /**
+     * Create a valid ZIP binary in pure PHP without requiring ext-zip
+     */
+    protected function packZipArchivePurePhp(array $files): string
+    {
+        $localData = '';
+        $centralDir = '';
+        $offset = 0;
+        $count = 0;
+        $useDeflate = function_exists('gzdeflate');
+
+        foreach ($files as $name => $content) {
+            $uncompSize = strlen($content);
+            $crc = crc32($content);
+
+            if ($useDeflate) {
+                $compData = gzdeflate($content, 6);
+                $method = 8;
+            } else {
+                $compData = $content;
+                $method = 0;
+            }
+            $compSize = strlen($compData);
+            $nameLen = strlen($name);
+
+            $localHeader = "PK\x03\x04"
+                . pack('vvvvvVVVvv', 20, 0, $method, 0, 0, $crc, $compSize, $uncompSize, $nameLen, 0)
+                . $name;
+
+            $localData .= $localHeader . $compData;
+
+            $centralHeader = "PK\x01\x02"
+                . pack('vvvvvvVVVvvvvvVV', 20, 20, 0, $method, 0, 0, $crc, $compSize, $uncompSize, $nameLen, 0, 0, 0, 0, 32, $offset)
+                . $name;
+
+            $centralDir .= $centralHeader;
+            $offset += strlen($localHeader) + $compSize;
+            $count++;
+        }
+
+        $eocd = "PK\x05\x06"
+            . pack('vvvvVVv', 0, 0, $count, $count, strlen($centralDir), $offset, 0);
+
+        return $localData . $centralDir . $eocd;
     }
 
     /**
