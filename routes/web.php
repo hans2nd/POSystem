@@ -42,7 +42,7 @@ Route::prefix('install')->name('install.')->group(function () {
 
 // Root redirect
 Route::get('/', function () {
-    if (!file_exists(storage_path('installed'))) {
+    if (!InstallController::isInstalled()) {
         return redirect()->route('install.index');
     }
     return auth()->check() 

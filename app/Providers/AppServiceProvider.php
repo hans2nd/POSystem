@@ -14,7 +14,7 @@ class AppServiceProvider extends ServiceProvider
     public function register(): void
     {
         // Fallback session & cache driver if app is not yet installed or during installation
-        if (request()->is('install*') || !file_exists(storage_path('installed'))) {
+        if (request()->is('install*') || (!file_exists(storage_path('installed')) && !\App\Http\Controllers\InstallController::isInstalled())) {
             config(['session.driver' => 'file']);
             config(['cache.default' => 'file']);
         }

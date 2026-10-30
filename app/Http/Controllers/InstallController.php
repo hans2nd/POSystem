@@ -10,11 +10,52 @@ use PDO;
 class InstallController extends Controller
 {
     /**
+     * Determine if the application has been installed.
+     */
+    public static function isInstalled(): bool
+    {
+        $lockFile = storage_path('installed');
+
+        // If explicitly unlocked by user during current session, allow wizard
+        if (session('installer_unlocked')) {
+            return false;
+        }
+
+        if (file_exists($lockFile)) {
+            return true;
+        }
+
+        // Auto-detect if database is already configured and migrated (e.g. CLI migration, cloned repo, or imported DB)
+        try {
+            if (config('database.default') && config('database.connections.' . config('database.default') . '.database')) {
+                if (DB::connection()->getPdo() && \Illuminate\Support\Facades\Schema::hasTable('users') && \Illuminate\Support\Facades\Schema::hasTable('migrations')) {
+                    if (DB::table('users')->exists()) {
+                        // Persist the lock file so subsequent checks are instant filesystem checks
+                        @file_put_contents($lockFile, json_encode([
+                            'installed_at' => now()->toIso8601String(),
+                            'app_url' => config('app.url'),
+                            'auto_detected' => true,
+                            'version' => app()->version(),
+                        ], JSON_PRETTY_PRINT));
+
+                        return true;
+                    }
+                }
+            }
+        } catch (\Throwable $e) {
+            // Cannot connect to DB or tables do not exist
+            return false;
+        }
+
+        return false;
+    }
+
+    /**
      * Show installation wizard
      */
     public function index()
     {
-        $isInstalled = file_exists(storage_path('installed'));
+        $isInstalled = self::isInstalled();
 
         // Check system requirements
         $requirements = [
@@ -230,19 +271,29 @@ class InstallController extends Controller
                     break;
 
                 case 'storage_link':
-                    Artisan::call('storage:link');
-                    $output = Artisan::output();
-                    Artisan::call('optimize:clear');
-                    $output .= "\n" . Artisan::output();
+                    try {
+                        Artisan::call('storage:link');
+                        $output = Artisan::output();
+                    } catch (\Throwable $e) {
+                        $output = "Symlink notice: " . $e->getMessage();
+                    }
+                    try {
+                        Artisan::call('optimize:clear');
+                        $output .= "\n" . Artisan::output();
+                    } catch (\Throwable $e) {
+                        $output .= "\nCache notice: " . $e->getMessage();
+                    }
                     $message = 'Symlink storage dan cache aplikasi berhasil disiapkan.';
                     break;
 
                 case 'finish':
-                    file_put_contents(storage_path('installed'), json_encode([
+                    @file_put_contents(storage_path('installed'), json_encode([
                         'installed_at' => now()->toIso8601String(),
                         'app_url' => config('app.url'),
                         'version' => app()->version(),
                     ], JSON_PRETTY_PRINT));
+
+                    session()->forget('installer_unlocked');
 
                     $message = 'Instalasi selesai! Aplikasi siap digunakan.';
                     break;
@@ -273,6 +324,8 @@ class InstallController extends Controller
         if (file_exists($lockFile)) {
             @unlink($lockFile);
         }
+
+        session(['installer_unlocked' => true]);
 
         return redirect()->route('install.index')
             ->with('success', 'Kunci installer dibuka. Anda dapat mengonfigurasi ulang aplikasi.');
